@@ -35,6 +35,7 @@ namespace MultiTcpServer
                 {
                     string dataFile = Path.Combine(_dataDir, $"ClientData_{DateTime.Now:yyyy-MM-dd}.csv");
                     bool fileExists = File.Exists(dataFile);
+                    int recordId = CountRecords(dataFile) + 1;
 
                     using (var fs = new FileStream(dataFile, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
                     using (var sw = new StreamWriter(fs, Encoding.UTF8))
@@ -45,8 +46,7 @@ namespace MultiTcpServer
                             sw.WriteLine("data_id,client_ip,data_time,data_message");
                         }
 
-                        // Write data row (auto-increment ID based on line count)
-                        int recordId = CountRecords(dataFile) + 1;
+                        // Write data row (ID counted before the file was opened for append)
                         string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
                         string escapedMessage = EscapeCsvField(message);
 
