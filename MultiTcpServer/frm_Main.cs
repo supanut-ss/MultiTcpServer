@@ -87,6 +87,49 @@ namespace MultiTcpServer
             }
         }
 
+        private const int MessageIdleTimeoutMs = 200;
+        private const int MaxMessageBytes = 64 * 1024;
+
+        private void ProcessClientMessage(string clientIP, MemoryStream pending)
+        {
+            EmitMessage(clientIP, pending.GetBuffer(), 0, (int)pending.Length);
+            pending.SetLength(0);
+        }
+
+        // Emit every complete line (ending in '\n') right away; keep any partial remainder
+        // in the buffer to be completed by later data or flushed by the idle timeout.
+        private void ProcessCompleteLines(string clientIP, MemoryStream pending)
+        {
+            byte[] buf = pending.GetBuffer();
+            int len = (int)pending.Length;
+            int last = Array.LastIndexOf(buf, (byte)'\n', len - 1);
+            if (last < 0) return;
+
+            int start = 0;
+            for (int i = 0; i <= last; i++)
+            {
+                if (buf[i] != (byte)'\n') continue;
+                EmitMessage(clientIP, buf, start, i - start);
+                start = i + 1;
+            }
+
+            int remaining = len - last - 1;
+            Buffer.BlockCopy(buf, last + 1, buf, 0, remaining);
+            pending.SetLength(remaining);
+        }
+
+        private void EmitMessage(string clientIP, byte[] data, int offset, int count)
+        {
+            string message = Encoding.UTF8.GetString(data, offset, count).Trim();
+            if (message.Length == 0) return;
+
+            _clientData[clientIP] = message;
+            AppendLog($"[{clientIP}] {message}");
+
+            // บันทึกข้อมูลลงฐานข้อมูล
+            SaveDataFromClient(clientIP, message);
+        }
+
         private async Task HandleClientAsync(TcpClient client)
         {
             string clientIP = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
@@ -99,19 +142,39 @@ namespace MultiTcpServer
                     byte[] buffer = new byte[1024];
                     int bytesRead;
 
+                    // Accumulate bytes until the line goes idle, so one logical message
+                    // split across several TCP reads is handled as a single message.
+                    var pending = new MemoryStream();
+                    Task<int> readTask = stream.ReadAsync(buffer, 0, buffer.Length);
+
                     while (_isRunning && client.Connected)
                     {
                         try
                         {
-                            bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-                            if (bytesRead == 0) break;
+                            if (pending.Length > 0)
+                            {
+                                var winner = await Task.WhenAny(readTask, Task.Delay(MessageIdleTimeoutMs));
+                                if (winner != readTask)
+                                {
+                                    // No new data within the idle window: message is complete
+                                    ProcessClientMessage(clientIP, pending);
+                                    continue;
+                                }
+                            }
 
-                            string message = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
-                            _clientData[clientIP] = message;
-                            AppendLog($"[{clientIP}] {message}");
+                            bytesRead = await readTask;
+                            if (bytesRead == 0)
+                            {
+                                ProcessClientMessage(clientIP, pending);
+                                break;
+                            }
 
-                            // บันทึกข้อมูลลงฐานข้อมูล
-                            SaveDataFromClient(clientIP, message);
+                            pending.Write(buffer, 0, bytesRead);
+                            ProcessCompleteLines(clientIP, pending);
+                            if (pending.Length >= MaxMessageBytes)
+                                ProcessClientMessage(clientIP, pending);
+
+                            readTask = stream.ReadAsync(buffer, 0, buffer.Length);
                         }
                         catch (IOException ioEx)
                         {
